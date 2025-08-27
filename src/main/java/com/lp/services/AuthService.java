@@ -1,18 +1,27 @@
-package com.lp.auth;
+package com.lp.services;
 
-import com.lp.config.EmailService;
-import com.lp.config.JwtService;
-import com.lp.user.Role;
-import com.lp.user.User;
-import com.lp.user.UserRepository;
-import io.jsonwebtoken.Jwts;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.lp.dto.AuthenticationRequest;
+import com.lp.dto.AuthenticationResponse;
+import com.lp.dto.RegisterRequest;
+import com.lp.dto.VerifyRequest;
+import com.lp.entities.Token;
+import com.lp.repository.TokenRepository;
+import com.lp.enums.TokenType;
+import com.lp.enums.Role;
+import com.lp.entities.User;
+import com.lp.repository.UserRepository;
 import jakarta.mail.MessagingException;
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
 import lombok.RequiredArgsConstructor;
+import org.springframework.http.HttpHeaders;
 import org.springframework.security.authentication.AuthenticationManager;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 
+import java.io.IOException;
 import java.time.LocalDateTime;
 import java.util.Optional;
 import java.util.Random;
@@ -21,7 +30,8 @@ import java.util.Random;
 @RequiredArgsConstructor
 public class AuthService {
 
-    private final UserRepository repository;
+    private final UserRepository userRepository;
+    private final TokenRepository tokenRepository;
     private final PasswordEncoder passwordEncoder;
     private final JwtService jwtService;
     private final AuthenticationManager authManager;
@@ -38,7 +48,7 @@ public class AuthService {
                 .password(passwordEncoder.encode(request.getPassword()))
                 .role(Role.USER)
                 .build();
-        repository.save(user);
+        userRepository.save(user);
         try {
             sendVerificationEmail(user);
             return true;
@@ -55,21 +65,23 @@ public class AuthService {
                         request.getPassword()
                 )
         );
-        var user = repository.findByEmail(request.getEmail()).orElseThrow();
+        var user = userRepository.findByEmail(request.getEmail()).orElseThrow();
 
         if (!user.isEnabled()) {
             throw new RuntimeException("Account not verified, please verify your account");
         }
 
-        var jwt = jwtService.generateToken(user);
+        var jwt = jwtService.generateAccessToken(user);
+        var refreshToken = jwtService.generateRefreshToken(user);
+        saveUserToken(user, jwt);
         return AuthenticationResponse.builder()
-                .token(jwt)
-                .expiresIn(jwtService.getExpiration())
+                .accessToken(jwt)
+                .refreshToken(refreshToken)
                 .build();
     }
 
     public AuthenticationResponse verifyUser(VerifyRequest request) {
-        Optional<User> optionalUser = repository.findByEmail(request.getEmail());
+        Optional<User> optionalUser = userRepository.findByEmail(request.getEmail());
         if (optionalUser.isPresent()) {
             User user = optionalUser.get();
             if (user.getVerificationExpiration().isBefore(LocalDateTime.now())) {
@@ -80,11 +92,13 @@ public class AuthService {
                 user.setEnabled(true);
                 user.setVerificationCode(null);
                 user.setVerificationExpiration(null);
-                repository.save(user);
-                var jwt = jwtService.generateToken(user);
+                var savedUser = userRepository.save(user);
+                var jwt = jwtService.generateAccessToken(user);
+                var refreshToken = jwtService.generateRefreshToken(user);
+                saveUserToken(savedUser, jwt);
                 return AuthenticationResponse.builder()
-                        .token(jwt)
-                        .expiresIn(jwtService.getExpiration())
+                        .accessToken(jwt)
+                        .refreshToken(refreshToken)
                         .build();
             }
             else {
@@ -96,8 +110,36 @@ public class AuthService {
         }
     }
 
+    public void refreshToken(
+            HttpServletRequest request,
+            HttpServletResponse response
+    ) throws IOException {
+        final String authHeader = request.getHeader(HttpHeaders.AUTHORIZATION);
+        final String refreshToken;
+        final String userEmail;
+
+        if (authHeader == null || !authHeader.startsWith("Bearer ")) {
+            return;
+        }
+
+        refreshToken = authHeader.substring(7);
+        userEmail = jwtService.extractUsername(refreshToken);
+        if (userEmail != null) {
+            var user = this.userRepository.findByEmail(userEmail).orElseThrow();
+            if (jwtService.isTokenValid(refreshToken, user)) {
+                var jwt = jwtService.generateAccessToken(user);
+                saveUserToken(user, jwt);
+                var authResponse = AuthenticationResponse.builder()
+                        .accessToken(jwt)
+                        .refreshToken(refreshToken)
+                        .build();
+                new ObjectMapper().writeValue(response.getOutputStream(), authResponse);
+            }
+        }
+    }
+
     public void resendVerificationCode(String email) {
-        Optional<User> optionalUser = repository.findByEmail(email);
+        Optional<User> optionalUser = userRepository.findByEmail(email);
         if (optionalUser.isPresent()) {
             User user = optionalUser.get();
             if (user.isEnabled()) {
@@ -111,7 +153,7 @@ public class AuthService {
             } catch (MessagingException e) {
                 throw new RuntimeException("Failed to resend verification code");
             }
-            repository.save(user);
+            userRepository.save(user);
         }
         else {
             throw new RuntimeException("User not found");
@@ -208,5 +250,31 @@ public class AuthService {
         Random random = new Random();
         int code = random.nextInt(900000) + 100000;
         return String.valueOf(code);
+    }
+
+    private void revokeAllUserTokens(User user) {
+        var validUserTokens= tokenRepository.findValidTokensByUserId(user.getId());
+        if (validUserTokens.isEmpty()) {
+            return;
+        }
+
+        validUserTokens.forEach(t -> {
+            t.setExpired(true);
+            t.setRevoked(true);
+        });
+
+        tokenRepository.saveAll(validUserTokens);
+    }
+
+    private void saveUserToken(User user, String jwt) {
+        revokeAllUserTokens(user);
+        var token = Token.builder()
+                .user(user)
+                .token(jwt)
+                .tokenType(TokenType.ACCESS)
+                .revoked(false)
+                .expired(false)
+                .build();
+        tokenRepository.save(token);
     }
 }

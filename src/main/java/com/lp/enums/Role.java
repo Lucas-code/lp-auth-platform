@@ -1,4 +1,4 @@
-package com.lp.user;
+package com.lp.enums;
 
 public enum Role {
     USER,

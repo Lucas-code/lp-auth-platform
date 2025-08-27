@@ -1,4 +1,4 @@
-package com.lp.config;
+package com.lp.services;
 
 import io.jsonwebtoken.Claims;
 import io.jsonwebtoken.Jwts;
@@ -22,6 +22,8 @@ public class JwtService {
     private String SECRET_KEY;
     @Value("${security.jwt.expiration-time}")
     private long jwtExpiration;
+    @Value("${security.jwt.refresh-token.expiration}")
+    private long refreshExpiration;
     public String extractUsername(String jwt) {
         return extractClaim(jwt, Claims::getSubject);
     }
@@ -31,21 +33,28 @@ public class JwtService {
         return claimResolver.apply(claims);
     }
 
-    public String generateToken(
+    public String generateAccessToken(
             UserDetails userDetails
     ) {
-        return generateToken(new HashMap<>(), userDetails);
+        return buildToken(new HashMap<>(), userDetails, jwtExpiration);
     }
 
-    public String generateToken(
-            Map<String, Object> extraClaims,
+    public String generateRefreshToken(
             UserDetails userDetails
+    ) {
+        return buildToken(new HashMap<>(), userDetails, refreshExpiration);
+    }
+
+    public String buildToken(
+            Map<String, Object> extraClaims,
+            UserDetails userDetails,
+            long expiration
     ) {
         return Jwts.builder()
                 .setClaims(extraClaims)
                 .setSubject(userDetails.getUsername())
                 .setIssuedAt(new Date(System.currentTimeMillis()))
-                .setExpiration(new Date(System.currentTimeMillis() + jwtExpiration))
+                .setExpiration(new Date(System.currentTimeMillis() + expiration))
                 .signWith(getSignInKey(), SignatureAlgorithm.HS256)
                 .compact();
     }

@@ -1,4 +1,4 @@
-package com.lp.auth;
+package com.lp.dto;
 
 import lombok.AllArgsConstructor;
 import lombok.Builder;
@@ -9,8 +9,10 @@ import lombok.NoArgsConstructor;
 @Builder
 @AllArgsConstructor
 @NoArgsConstructor
-public class AuthenticationResponse {
+public class RegisterRequest {
 
-    private String token;
-    private long expiresIn;
+    private String firstName;
+    private String lastName;
+    private String email;
+    private String password;
 }

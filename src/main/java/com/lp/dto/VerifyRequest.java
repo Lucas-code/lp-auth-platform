@@ -1,4 +1,4 @@
-package com.lp.auth;
+package com.lp.dto;
 
 import lombok.Getter;
 import lombok.Setter;

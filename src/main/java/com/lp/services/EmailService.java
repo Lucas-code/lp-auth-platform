@@ -1,4 +1,4 @@
-package com.lp.config;
+package com.lp.services;
 
 import jakarta.mail.MessagingException;
 import jakarta.mail.internet.MimeMessage;
