@@ -1,5 +1,6 @@
 package com.lp.enums;
 
 public enum TokenType {
-    ACCESS
+    ACCESS,
+    REFRESH
 }

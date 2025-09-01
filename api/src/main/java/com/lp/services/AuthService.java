@@ -12,14 +12,17 @@ import com.lp.enums.Role;
 import com.lp.entities.User;
 import com.lp.repository.UserRepository;
 import jakarta.mail.MessagingException;
-import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.Cookie;
 import jakarta.servlet.http.HttpServletResponse;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.HttpHeaders;
+import org.springframework.http.ResponseCookie;
 import org.springframework.security.authentication.AuthenticationManager;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
+import org.thymeleaf.TemplateEngine;
+import org.thymeleaf.context.Context;
 
 import java.io.IOException;
 import java.time.LocalDateTime;
@@ -36,11 +39,13 @@ public class AuthService {
     private final JwtService jwtService;
     private final AuthenticationManager authManager;
     private final EmailService emailService;
+    private final TemplateEngine templateEngine;
+    private final UrlService urlService;
 
     public boolean register(RegisterRequest request) {
         var user = User.builder()
-                .firstName(request.getFirstName())
-                .lastName(request.getLastName())
+//                .firstName(request.getFirstName())
+//                .lastName(request.getLastName())
                 .email(request.getEmail())
                 .verificationCode(generateVerificationCode())
                 .verificationExpiration(LocalDateTime.now().plusMinutes(15))
@@ -58,7 +63,7 @@ public class AuthService {
         }
     }
 
-    public AuthenticationResponse authenticate(AuthenticationRequest request) {
+    public void authenticate(AuthenticationRequest request, HttpServletResponse response) throws IOException {
         authManager.authenticate(
                 new UsernamePasswordAuthenticationToken(
                         request.getEmail(),
@@ -72,16 +77,37 @@ public class AuthService {
         }
 
         var jwt = jwtService.generateAccessToken(user);
+//        saveUserToken(user, jwt);
         var refreshToken = jwtService.generateRefreshToken(user);
-        saveUserToken(user, jwt);
-        return AuthenticationResponse.builder()
-                .accessToken(jwt)
-                .refreshToken(refreshToken)
-                .build();
+        saveUserRefreshToken(user, refreshToken);
+        setResponseAuthData(response, jwt, refreshToken, user);
     }
 
-    public AuthenticationResponse verifyUser(VerifyRequest request) {
-        Optional<User> optionalUser = userRepository.findByEmail(request.getEmail());
+    private void setResponseAuthData(HttpServletResponse response, String jwt, String refreshToken, User user) throws IOException {
+//        Cookie refreshCookie = new Cookie("refreshToken", refreshToken);
+//        refreshCookie.setHttpOnly(true);
+//        refreshCookie.setAttribute("");
+//        refreshCookie.setPath("/api/v1/auth");
+//        refreshCookie.setMaxAge(7 * 24 * 60 * 60);
+//        response.addCookie(refreshCookie);
+        ResponseCookie refreshCookie = ResponseCookie.from("refreshToken", refreshToken)
+                .httpOnly(true)
+//                .sameSite("None")
+//                .secure(false)
+                .path("/api/v1/auth")
+                .maxAge(jwtService.getRefreshTokenExpiration())
+                .build();
+        response.addHeader(HttpHeaders.SET_COOKIE, refreshCookie.toString());
+        var authResponse = AuthenticationResponse.builder()
+                .accessToken(jwt)
+                .userEmail(user.getEmail())
+                .role(user.getRole())
+                .build();
+        new ObjectMapper().writeValue(response.getOutputStream(), authResponse);
+    }
+
+    public void verifyUser(Integer id,VerifyRequest request, HttpServletResponse response) throws IOException {
+        Optional<User> optionalUser = userRepository.findById(id);
         if (optionalUser.isPresent()) {
             User user = optionalUser.get();
             if (user.getVerificationExpiration().isBefore(LocalDateTime.now())) {
@@ -94,12 +120,10 @@ public class AuthService {
                 user.setVerificationExpiration(null);
                 var savedUser = userRepository.save(user);
                 var jwt = jwtService.generateAccessToken(user);
+//                saveUserToken(savedUser, jwt);
                 var refreshToken = jwtService.generateRefreshToken(user);
-                saveUserToken(savedUser, jwt);
-                return AuthenticationResponse.builder()
-                        .accessToken(jwt)
-                        .refreshToken(refreshToken)
-                        .build();
+                saveUserRefreshToken(user, refreshToken);
+                setResponseAuthData(response, jwt, refreshToken, user);
             }
             else {
                 throw new RuntimeException("Invalid verification code");
@@ -111,35 +135,30 @@ public class AuthService {
     }
 
     public void refreshToken(
-            HttpServletRequest request,
+            String refreshToken,
             HttpServletResponse response
     ) throws IOException {
-        final String authHeader = request.getHeader(HttpHeaders.AUTHORIZATION);
-        final String refreshToken;
         final String userEmail;
 
-        if (authHeader == null || !authHeader.startsWith("Bearer ")) {
-            return;
-        }
-
-        refreshToken = authHeader.substring(7);
         userEmail = jwtService.extractUsername(refreshToken);
         if (userEmail != null) {
             var user = this.userRepository.findByEmail(userEmail).orElseThrow();
-            if (jwtService.isTokenValid(refreshToken, user)) {
+            var isTokenValid = tokenRepository.findByToken(refreshToken).map(t -> !t.isRevoked()).orElse(false);
+            if (jwtService.isTokenValid(refreshToken, user) && isTokenValid) {
                 var jwt = jwtService.generateAccessToken(user);
-                saveUserToken(user, jwt);
+//                saveUserToken(user, jwt);
                 var authResponse = AuthenticationResponse.builder()
                         .accessToken(jwt)
-                        .refreshToken(refreshToken)
                         .build();
                 new ObjectMapper().writeValue(response.getOutputStream(), authResponse);
+                return;
             }
         }
+        throw new RuntimeException("Invalid refresh token");
     }
 
-    public void resendVerificationCode(String email) {
-        Optional<User> optionalUser = userRepository.findByEmail(email);
+    public void resendVerificationCode(Integer id) {
+        Optional<User> optionalUser = userRepository.findById(id);
         if (optionalUser.isPresent()) {
             User user = optionalUser.get();
             if (user.isEnabled()) {
@@ -147,7 +166,7 @@ public class AuthService {
             }
 
             user.setVerificationCode(generateVerificationCode());
-            user.setVerificationExpiration(LocalDateTime.now().plusHours(1));
+            user.setVerificationExpiration(LocalDateTime.now().plusMinutes(15));
             try {
                 sendVerificationEmail(user);
             } catch (MessagingException e) {
@@ -160,89 +179,19 @@ public class AuthService {
         }
     }
 
+    public boolean isUserEnabled(Integer id) {
+        var user = userRepository.findById(id);
+        return user.map(User::isEnabled).orElse(false);
+    }
+
     public void sendVerificationEmail(User user) throws MessagingException {
         String subject = "Account Verification";
         String verificationCode = user.getVerificationCode();
-        String message = "<!DOCTYPE html>\n" +
-                "<html lang=\"en\">\n" +
-                "<head>\n" +
-                "    <meta charset=\"UTF-8\">\n" +
-                "    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n" +
-                "    <title>Email Verification</title>\n" +
-                "    <style>\n" +
-                "        body {\n" +
-                "            font-family: Arial, sans-serif;\n" +
-                "            margin: 0;\n" +
-                "            padding: 0;\n" +
-                "            background-color: #f4f4f4;\n" +
-                "        }\n" +
-                "        .email-container {\n" +
-                "            width: 100%;\n" +
-                "            max-width: 600px;\n" +
-                "            margin: 0 auto;\n" +
-                "            background-color: #ffffff;\n" +
-                "            padding: 20px;\n" +
-                "            border-radius: 8px;\n" +
-                "            box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1);\n" +
-                "        }\n" +
-                "        .email-header {\n" +
-                "            text-align: center;\n" +
-                "            margin-bottom: 20px;\n" +
-                "        }\n" +
-                "        .email-header h1 {\n" +
-                "            color: #4CAF50;\n" +
-                "            font-size: 24px;\n" +
-                "            margin: 0;\n" +
-                "        }\n" +
-                "        .email-body {\n" +
-                "            font-size: 16px;\n" +
-                "            line-height: 1.5;\n" +
-                "            color: #333;\n" +
-                "            margin-bottom: 20px;\n" +
-                "        }\n" +
-                "        .verification-code {\n" +
-                "            font-size: 22px;\n" +
-                "            font-weight: bold;\n" +
-                "            color: #4CAF50;\n" +
-                "            display: inline-block;\n" +
-                "            background-color: #f0f8f0;\n" +
-                "            padding: 10px;\n" +
-                "            border-radius: 5px;\n" +
-                "            margin-top: 10px;\n" +
-                "        }\n" +
-                "        .email-footer {\n" +
-                "            font-size: 14px;\n" +
-                "            text-align: center;\n" +
-                "            color: #777;\n" +
-                "            margin-top: 30px;\n" +
-                "        }\n" +
-                "        .email-footer a {\n" +
-                "            color: #4CAF50;\n" +
-                "            text-decoration: none;\n" +
-                "        }\n" +
-                "    </style>\n" +
-                "</head>\n" +
-                "<body>\n" +
-                "    <div class=\"email-container\">\n" +
-                "        <div class=\"email-header\">\n" +
-                "            <h1>Email Verification Code</h1>\n" +
-                "        </div>\n" +
-                "        <div class=\"email-body\">\n" +
-                "            <p>Hi there,</p>\n" +
-                "            <p>Thank you for registering with us! To complete your registration and verify your email address, please use the following verification code:</p>\n" +
-                "            <div class=\"verification-code\">\n" +
-                String.format("                %s\n",verificationCode) +
-                "            </div>\n" +
-                "            <p>This verification code is valid for the next 10 minutes. Please enter it on the verification page to complete your registration process.</p>\n" +
-                "            <p>If you did not request this code, please ignore this email.</p>\n" +
-                "        </div>\n" +
-                "        <div class=\"email-footer\">\n" +
-                "            <p>Best regards, <br> The [Your Company Name] Team</p>\n" +
-                "            <p>For any questions, visit <a href=\"http://www.yourwebsite.com/support\">our support page</a>.</p>\n" +
-                "        </div>\n" +
-                "    </div>\n" +
-                "</body>\n" +
-                "</html>\n";
+        String verificationLink = urlService.getClientUrl() + "/verify/" + user.getId();
+        Context context = new Context();
+        context.setVariable("verificationCode", verificationCode);
+        context.setVariable("verificationLink", verificationLink);
+        String message = templateEngine.process("verificationTemplate", context);
         emailService.sendVerificationEmail(user.getEmail(), subject, message);
     }
 
@@ -253,17 +202,29 @@ public class AuthService {
     }
 
     private void revokeAllUserTokens(User user) {
-        var validUserTokens= tokenRepository.findValidTokensByUserId(user.getId());
+        var validUserTokens= tokenRepository.findValidAccessTokensByUserId(user.getId());
         if (validUserTokens.isEmpty()) {
             return;
         }
 
         validUserTokens.forEach(t -> {
-            t.setExpired(true);
             t.setRevoked(true);
         });
 
         tokenRepository.saveAll(validUserTokens);
+    }
+
+    private void revokeAllUserRefreshTokens(User user) {
+        var validUserRefreshTokens= tokenRepository.findValidRefreshTokensByUserId(user.getId());
+        if (validUserRefreshTokens.isEmpty()) {
+            return;
+        }
+
+        validUserRefreshTokens.forEach(t -> {
+            t.setRevoked(true);
+        });
+
+        tokenRepository.saveAll(validUserRefreshTokens);
     }
 
     private void saveUserToken(User user, String jwt) {
@@ -273,7 +234,17 @@ public class AuthService {
                 .token(jwt)
                 .tokenType(TokenType.ACCESS)
                 .revoked(false)
-                .expired(false)
+                .build();
+        tokenRepository.save(token);
+    }
+
+    private void saveUserRefreshToken(User user, String refreshToken) {
+        revokeAllUserRefreshTokens(user);
+        var token = Token.builder()
+                .user(user)
+                .token(refreshToken)
+                .tokenType(TokenType.REFRESH)
+                .revoked(false)
                 .build();
         tokenRepository.save(token);
     }

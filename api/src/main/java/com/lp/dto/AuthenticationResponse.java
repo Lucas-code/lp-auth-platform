@@ -1,5 +1,6 @@
 package com.lp.dto;
 
+import com.lp.enums.Role;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Data;
@@ -12,5 +13,6 @@ import lombok.NoArgsConstructor;
 public class AuthenticationResponse {
 
     private String accessToken;
-    private String refreshToken;
+    private String userEmail;
+    private Role role;
 }

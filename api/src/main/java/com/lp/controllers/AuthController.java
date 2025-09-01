@@ -12,6 +12,7 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
 import java.io.IOException;
+import java.util.Optional;
 
 @RestController
 @RequestMapping("/api/v1/auth")
@@ -33,40 +34,46 @@ public class AuthController {
     }
 
     @PostMapping("/login")
-    public ResponseEntity<AuthenticationResponse> authenticate(
-            @RequestBody AuthenticationRequest request
-    ) {
-        return ResponseEntity.ok(authService.authenticate(request));
+    public void authenticate(
+            @RequestBody AuthenticationRequest request,
+            HttpServletResponse response
+    ) throws IOException {
+        authService.authenticate(request, response);
     }
 
     @PostMapping("/verify")
-    public ResponseEntity<?> verify(
-            @RequestBody VerifyRequest request
-    ) {
-        try {
-            return ResponseEntity.ok(authService.verifyUser(request));
-        } catch (RuntimeException e) {
-            return ResponseEntity.badRequest().body(e.getMessage());
-        }
+    public void verify(
+            @RequestParam Integer id,
+            @RequestBody VerifyRequest request,
+            HttpServletResponse response
+    ) throws IOException {
+        authService.verifyUser(id, request, response);
     }
 
     @PostMapping("/resendVerification")
     public ResponseEntity<?> resendVerification(
-            @RequestParam String email
+            @RequestParam Integer id
     ) {
         try {
-            authService.resendVerificationCode(email);
+            authService.resendVerificationCode(id);
             return ResponseEntity.ok("Verification code resent");
         } catch (RuntimeException e) {
             return ResponseEntity.badRequest().body(e.getMessage());
         }
     }
 
-    @PostMapping("/refresh-token")
+    @GetMapping ("/refresh-token")
     public void refreshToken(
-            HttpServletRequest request,
+            @CookieValue("refreshToken") String refreshToken,
             HttpServletResponse response
     ) throws IOException {
-        authService.refreshToken(request, response);
+        authService.refreshToken(refreshToken, response);
+    }
+
+    @GetMapping("/userEnabled")
+    public ResponseEntity<Boolean> isUserEnabled(
+            @RequestParam Integer id
+    ) {
+        return ResponseEntity.ok(authService.isUserEnabled(id));
     }
 }
